@@ -17,9 +17,9 @@ package io.seata.rm.datasource;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.concurrent.Callable;
 
-import com.alibaba.druid.util.JdbcConstants;
-
+import io.seata.common.util.StringUtils;
 import io.seata.config.ConfigurationFactory;
 import io.seata.core.constants.ConfigurationKeys;
 import io.seata.core.exception.TransactionException;
@@ -28,9 +28,9 @@ import io.seata.core.model.BranchStatus;
 import io.seata.core.model.BranchType;
 import io.seata.rm.DefaultResourceManager;
 import io.seata.rm.datasource.exec.LockConflictException;
+import io.seata.rm.datasource.exec.LockRetryController;
 import io.seata.rm.datasource.undo.SQLUndoLog;
-import io.seata.rm.datasource.undo.UndoLogManager;
-import io.seata.rm.datasource.undo.UndoLogManagerOracle;
+import io.seata.rm.datasource.undo.UndoLogManagerFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -47,8 +47,13 @@ public class ConnectionProxy extends AbstractConnectionProxy {
 
     private static final int DEFAULT_REPORT_RETRY_COUNT = 5;
 
-    private static int REPORT_RETRY_COUNT = ConfigurationFactory.getInstance().getInt(
+    private static final int REPORT_RETRY_COUNT = ConfigurationFactory.getInstance().getInt(
         ConfigurationKeys.CLIENT_REPORT_RETRY_COUNT, DEFAULT_REPORT_RETRY_COUNT);
+
+    public static final boolean IS_REPORT_SUCCESS_ENABLE = ConfigurationFactory.getInstance().getBoolean(
+        ConfigurationKeys.CLIENT_REPORT_SUCCESS_ENABLE, true);
+
+    private final static LockRetryPolicy LOCK_RETRY_POLICY = new LockRetryPolicy();
 
     /**
      * Instantiates a new Connection proxy.
@@ -109,29 +114,39 @@ public class ConnectionProxy extends AbstractConnectionProxy {
                 throw new LockConflictException();
             }
         } catch (TransactionException e) {
-            recognizeLockKeyConflictException(e);
+            recognizeLockKeyConflictException(e, lockKeys);
         }
     }
 
     /**
-     * Register.
+     * Lock query.
      *
-     * @param lockKeys the lockKeys
+     * @param lockKeys the lock keys
      * @throws SQLException the sql exception
      */
-    public void register(String lockKeys) throws SQLException {
+    public boolean lockQuery(String lockKeys) throws SQLException {
         // Just check lock without requiring lock by now.
+        boolean result = false;
         try {
-            DefaultResourceManager.get().branchRegister(BranchType.AT, getDataSourceProxy().getResourceId(), null,
-                context.getXid(), null, lockKeys);
+            result = DefaultResourceManager.get().lockQuery(BranchType.AT, getDataSourceProxy().getResourceId(),
+                context.getXid(), lockKeys);
         } catch (TransactionException e) {
-            recognizeLockKeyConflictException(e);
+            recognizeLockKeyConflictException(e, lockKeys);
         }
+        return result;
     }
 
     private void recognizeLockKeyConflictException(TransactionException te) throws SQLException {
+        recognizeLockKeyConflictException(te, null);
+    }
+
+    private void recognizeLockKeyConflictException(TransactionException te, String lockKeys) throws SQLException {
         if (te.getCode() == TransactionExceptionCode.LockKeyConflict) {
-            throw new LockConflictException();
+            StringBuilder reasonBuilder = new StringBuilder("get global lock fail, xid:" + context.getXid());
+            if (StringUtils.isNotBlank(lockKeys)) {
+                reasonBuilder.append(", lockKeys:").append(lockKeys);
+            }
+            throw new LockConflictException(reasonBuilder.toString());
         } else {
             throw new SQLException(te);
         }
@@ -158,6 +173,19 @@ public class ConnectionProxy extends AbstractConnectionProxy {
 
     @Override
     public void commit() throws SQLException {
+        try {
+            LOCK_RETRY_POLICY.execute(() -> {
+                doCommit();
+                return null;
+            });
+        } catch (SQLException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new SQLException(e);
+        }
+    }
+
+    private void doCommit() throws SQLException {
         if (context.inGlobalTransaction()) {
             processGlobalTransactionCommit();
         } else if (context.isGlobalLockRequire()) {
@@ -182,16 +210,12 @@ public class ConnectionProxy extends AbstractConnectionProxy {
         try {
             register();
         } catch (TransactionException e) {
-            recognizeLockKeyConflictException(e);
+            recognizeLockKeyConflictException(e, context.buildLockKeys());
         }
 
         try {
             if (context.hasUndoLog()) {
-                if (JdbcConstants.ORACLE.equalsIgnoreCase(this.getDbType())) {
-                    UndoLogManagerOracle.flushUndoLogs(this);
-                } else {
-                    UndoLogManager.flushUndoLogs(this);
-                }
+                UndoLogManagerFactory.getUndoLogManager(this.getDbType()).flushUndoLogs(this);
             }
             targetConnection.commit();
         } catch (Throwable ex) {
@@ -199,7 +223,9 @@ public class ConnectionProxy extends AbstractConnectionProxy {
             report(false);
             throw new SQLException(ex);
         }
-        report(true);
+        if (IS_REPORT_SUCCESS_ENABLE) {
+            report(true);
+        }
         context.reset();
     }
 
@@ -212,19 +238,17 @@ public class ConnectionProxy extends AbstractConnectionProxy {
     @Override
     public void rollback() throws SQLException {
         targetConnection.rollback();
-        if (context.inGlobalTransaction()) {
-            if (context.isBranchRegistered()) {
-                report(false);
-            }
+        if (context.inGlobalTransaction() && context.isBranchRegistered()) {
+            report(false);
         }
         context.reset();
     }
 
     @Override
     public void setAutoCommit(boolean autoCommit) throws SQLException {
-        if ((autoCommit) && !getAutoCommit()) {
+        if (autoCommit && !getAutoCommit()) {
             // change autocommit from false to true, we should commit() first according to JDBC spec.
-            commit();
+            doCommit();
         }
         targetConnection.setAutoCommit(autoCommit);
     }
@@ -234,7 +258,7 @@ public class ConnectionProxy extends AbstractConnectionProxy {
         while (retry > 0) {
             try {
                 DefaultResourceManager.get().branchReport(BranchType.AT, context.getXid(), context.getBranchId(),
-                    (commitDone ? BranchStatus.PhaseOne_Done : BranchStatus.PhaseOne_Failed), null);
+                    commitDone ? BranchStatus.PhaseOne_Done : BranchStatus.PhaseOne_Failed, null);
                 return;
             } catch (Throwable ex) {
                 LOGGER.error("Failed to report [" + context.getBranchId() + "/" + context.getXid() + "] commit done ["
@@ -245,6 +269,43 @@ public class ConnectionProxy extends AbstractConnectionProxy {
                     throw new SQLException("Failed to report branch status " + commitDone, ex);
                 }
             }
+        }
+    }
+
+    public static class LockRetryPolicy {
+        protected static final boolean LOCK_RETRY_POLICY_BRANCH_ROLLBACK_ON_CONFLICT = ConfigurationFactory
+            .getInstance().getBoolean(ConfigurationKeys.CLIENT_LOCK_RETRY_POLICY_BRANCH_ROLLBACK_ON_CONFLICT, true);
+
+        public <T> T execute(Callable<T> callable) throws Exception {
+            if (LOCK_RETRY_POLICY_BRANCH_ROLLBACK_ON_CONFLICT) {
+                return callable.call();
+            } else {
+                return doRetryOnLockConflict(callable);
+            }
+        }
+
+        protected <T> T doRetryOnLockConflict(Callable<T> callable) throws Exception {
+            LockRetryController lockRetryController = new LockRetryController();
+            while (true) {
+                try {
+                    return callable.call();
+                } catch (LockConflictException lockConflict) {
+                    onException(lockConflict);
+                    lockRetryController.sleep(lockConflict);
+                } catch (Exception e) {
+                    onException(e);
+                    throw e;
+                }
+            }
+        }
+
+        /**
+         * Callback on exception in doLockRetryOnConflict.
+         *
+         * @param e invocation exception
+         * @throws Exception error
+         */
+        protected void onException(Exception e) throws Exception {
         }
     }
 }

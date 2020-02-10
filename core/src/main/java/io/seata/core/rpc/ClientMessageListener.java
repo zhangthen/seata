@@ -20,8 +20,7 @@ import io.seata.core.protocol.RpcMessage;
 /**
  * The interface Client message listener.
  *
- * @author jimin.jm @alibaba-inc.com
- * @date 2018 /10/10
+ * @author slievrly
  */
 public interface ClientMessageListener {
     /**
@@ -29,7 +28,6 @@ public interface ClientMessageListener {
      *
      * @param request       the msg id
      * @param serverAddress the server address
-     * @param sender        the sender
      */
-    void onMessage(RpcMessage request, String serverAddress, ClientMessageSender sender);
+    void onMessage(RpcMessage request, String serverAddress);
 }

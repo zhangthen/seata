@@ -16,7 +16,7 @@
 package io.seata.rm.datasource.undo;
 
 import io.seata.rm.datasource.DataCompareUtils;
-import io.seata.rm.datasource.sql.SQLType;
+import io.seata.sqlparser.SQLType;
 import io.seata.rm.datasource.sql.struct.TableRecords;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -146,4 +146,14 @@ public abstract class BaseUndoLogParserTest extends BaseH2Test{
         LOGGER.info("elapsed time {} ms.", (end - start));
     }
 
+    @Test
+    void testDecodeDefaultContent() {
+        byte[] defaultContent = getParser().getDefaultContent();
+
+        BranchUndoLog branchUndoLog = getParser().decode(defaultContent);
+        Assertions.assertNotNull(branchUndoLog);
+        Assertions.assertNull(branchUndoLog.getXid());
+        Assertions.assertEquals(0L, branchUndoLog.getBranchId());
+        Assertions.assertNull(branchUndoLog.getSqlUndoLogs());
+    }
 }

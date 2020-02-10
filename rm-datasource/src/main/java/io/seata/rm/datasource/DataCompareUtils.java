@@ -22,7 +22,7 @@ import io.seata.rm.datasource.sql.struct.Field;
 import io.seata.rm.datasource.sql.struct.Row;
 import io.seata.rm.datasource.sql.struct.TableMeta;
 import io.seata.rm.datasource.sql.struct.TableRecords;
-import io.seata.rm.datasource.undo.UndoLogManager;
+import io.seata.rm.datasource.undo.AbstractUndoLogManager;
 import io.seata.rm.datasource.undo.parser.FastjsonUndoLogParser;
 
 import java.math.BigDecimal;
@@ -39,6 +39,10 @@ import java.util.Objects;
  * @author Geng Zhang
  */
 public class DataCompareUtils {
+
+    private DataCompareUtils() {
+
+    }
 
     /**
      * Is field equals.
@@ -62,7 +66,7 @@ public class DataCompareUtils {
                         if (f1.getValue() == null) {
                             return Result.buildWithParams(false, "Field not equals, name {}, new value is null", f0.getName());
                         } else {
-                            String currentSerializer = UndoLogManager.getCurrentSerializer();
+                            String currentSerializer = AbstractUndoLogManager.getCurrentSerializer();
                             if (StringUtils.equals(currentSerializer, FastjsonUndoLogParser.NAME)) {
                                 convertType(f0, f1);
                             }
@@ -147,17 +151,19 @@ public class DataCompareUtils {
         // new row to map
         Map<String, Map<String, Field>> newRowsMap = rowListToMap(newRows, tableMetaData.getPkName());
         // compare data
-        for (String rowKey : oldRowsMap.keySet()) {
-            Map<String, Field> oldRow = oldRowsMap.get(rowKey);
-            Map<String, Field> newRow = newRowsMap.get(rowKey);
+        for (Map.Entry<String, Map<String, Field>> oldEntry : oldRowsMap.entrySet()) {
+            String key = oldEntry.getKey();
+            Map<String, Field> oldRow = oldEntry.getValue();
+            Map<String, Field> newRow = newRowsMap.get(key);
             if (newRow == null) {
-                return Result.buildWithParams(false, "compare row failed, rowKey {}, reason [newRow is null]", rowKey);
+                return Result.buildWithParams(false, "compare row failed, rowKey {}, reason [newRow is null]", key);
             }
-            for (String fieldName : oldRow.keySet()) {
-                Field oldField = oldRow.get(fieldName);
+            for (Map.Entry<String, Field> oldRowEntry : oldRow.entrySet()) {
+                String fieldName = oldRowEntry.getKey();
+                Field oldField = oldRowEntry.getValue();
                 Field newField = newRow.get(fieldName);
                 if (newField == null) {
-                    return Result.buildWithParams(false, "compare row failed, rowKey {}, fieldName {}, reason [newField is null]", rowKey, fieldName);
+                    return Result.buildWithParams(false, "compare row failed, rowKey {}, fieldName {}, reason [newField is null]", key, fieldName);
                 }
                 Result<Boolean> oldEqualsNewFieldResult = isFieldEquals(oldField, newField);
                 if (!oldEqualsNewFieldResult.getResult()) {

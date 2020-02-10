@@ -15,11 +15,12 @@
  */
 package io.seata.server.session;
 
+import io.seata.server.lock.memory.MemoryLocker;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 import io.seata.common.util.CompressUtil;
 import io.seata.core.exception.TransactionException;
@@ -65,7 +66,7 @@ public class BranchSession implements Lockable, Comparable<BranchSession>, Sessi
 
     private String applicationData;
 
-    private ConcurrentHashMap<Map<String, Long>, Set<String>> lockHolder
+    private ConcurrentMap<MemoryLocker.BucketLockMap, Set<String>> lockHolder
         = new ConcurrentHashMap<>();
 
     /**
@@ -255,7 +256,7 @@ public class BranchSession implements Lockable, Comparable<BranchSession>, Sessi
 
     @Override
     public int compareTo(BranchSession o) {
-        return this.branchId < o.branchId ? -1 : (this.branchId > o.branchId ? 1 : 0);
+        return Long.compare(this.branchId, o.branchId);
     }
 
     /**
@@ -263,18 +264,24 @@ public class BranchSession implements Lockable, Comparable<BranchSession>, Sessi
      *
      * @return the lock holder
      */
-    public ConcurrentHashMap<Map<String, Long>, Set<String>> getLockHolder() {
+    public ConcurrentMap<MemoryLocker.BucketLockMap, Set<String>> getLockHolder() {
         return lockHolder;
     }
 
     @Override
     public boolean lock() throws TransactionException {
-        return LockerFactory.getLockManager().acquireLock(this);
+        if (this.getBranchType().equals(BranchType.AT)) {
+            return LockerFactory.getLockManager().acquireLock(this);
+        }
+        return true;
     }
 
     @Override
     public boolean unlock() throws TransactionException {
-        return LockerFactory.getLockManager().releaseLock(this);
+        if (this.getBranchType() == BranchType.AT) {
+            return LockerFactory.getLockManager().releaseLock(this);
+        }
+        return true;
     }
 
     @Override
@@ -375,6 +382,7 @@ public class BranchSession implements Lockable, Comparable<BranchSession>, Sessi
             + 4 // lockKeyBytes.length
             + 2 // clientIdBytes.length
             + 4 // applicationDataBytes.length
+            + 4 // xidBytes.size
             + 1 // statusCode
             + (resourceIdBytes == null ? 0 : resourceIdBytes.length)
             + (lockKeyBytes == null ? 0 : lockKeyBytes.length)
