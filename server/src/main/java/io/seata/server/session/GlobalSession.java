@@ -107,7 +107,7 @@ public class GlobalSession implements SessionLifecycle, SessionStorable {
     public boolean canBeCommittedAsync() {
         for (BranchSession branchSession : branchSessions) {
             if (branchSession.getBranchType() == BranchType.TCC) {
-                return false;
+                return true;
             }
         }
         return true;
